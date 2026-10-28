@@ -18,6 +18,8 @@
 #     "pandas",
 #     "pooch",
 #     "pyarrow==24.0.0",
+#     # scanpy 1.12.4 neighbors fails on the csr_array of pynndescent 0.7 (scverse/scanpy#4444).
+#     "pynndescent<0.7",
 #     "scanorama",
 #     "scanpy==1.12.*",
 #     "scib-metrics",
@@ -46,6 +48,7 @@
 # python-annoy = "*"
 # leidenalg = "*"
 # pooch = "*"
+# pynndescent = "<0.7"
 # anthropic = "1.17.*"
 # openai = "==3.26.1"
 # pyarrow = "==24.0.0"
