@@ -2,8 +2,8 @@
 
 Two marimo notebooks show Icechunk with single-cell data:
 
-- **Notebook 1** (`notebooks/01_commits_as_provenance.py`) follows the scanpy PBMC3k tutorial and makes one Icechunk commit per stage. The commit history is the provenance record. It runs in about 1 minute and needs no account.
-- **Notebook 2** (`notebooks/02_agentic_integration_shootout.py`) runs 7 LLM agents at the same time, one per batch-integration method. Each agent works on its own Icechunk branch. An evaluator agent promotes the best result to `main`. Four failure scenarios then compare Icechunk with a careful sidecar-file baseline. It needs an LLM API key and a store, and it costs a few cents of API use.
+- **Notebook 1** (`01_commits_as_provenance.py`) follows the scanpy PBMC3k tutorial and makes one Icechunk commit per stage. The commit history is the provenance record. It runs in about 1 minute and needs no account.
+- **Notebook 2** (`02_agentic_integration_shootout.py`) runs 7 LLM agents at the same time, one per batch-integration method. Each agent works on its own Icechunk branch. An evaluator agent promotes the best result to `main`. Four failure scenarios then compare Icechunk with a careful sidecar-file baseline. It needs an LLM API key and a store, and it costs a few cents of API use.
 
 Each notebook is one file. It holds all of its code and its dependency list. You can run it on your laptop or on molab.
 
@@ -25,13 +25,13 @@ The first run of each notebook installs its environment. That takes a few minute
 ### Notebook 1
 
 ```bash
-pixi run --script notebooks/01_commits_as_provenance.py
+pixi run --script 01_commits_as_provenance.py
 ```
 
 This command runs the notebook to the end. To open it in marimo instead, use this command and then click "Run all":
 
 ```bash
-pixi exec marimo edit --sandbox=pixi notebooks/01_commits_as_provenance.py
+pixi exec marimo edit --sandbox=pixi 01_commits_as_provenance.py
 ```
 
 Each run writes a new Icechunk repository to `data/nb1/`.
@@ -51,10 +51,10 @@ To run a stage again, restart the kernel and run all cells again.
 4. Run the notebook:
 
    ```bash
-   pixi run --script notebooks/02_agentic_integration_shootout.py
+   pixi run --script 02_agentic_integration_shootout.py
    ```
 
-   To open it in marimo instead, use `pixi exec marimo edit --sandbox=pixi notebooks/02_agentic_integration_shootout.py` and click "Run all" once.
+   To open it in marimo instead, use `pixi exec marimo edit --sandbox=pixi 02_agentic_integration_shootout.py` and click "Run all" once.
 5. Log in to Arraylake. If the notebook has no Arraylake login, its login cell prints a link and a code. Open the link, check that the code matches, and approve. The run then continues. To skip the login, set `ARRAYLAKE_TOKEN` to an Arraylake API token.
 
 A run takes about 25 to 50 minutes. With the default models, a run costs about US$0.015.
@@ -70,12 +70,12 @@ molab reads the dependency list at the top of the notebook and installs it.
 ### Notebook 1 on molab
 
 1. Open molab.marimo.io and create a new notebook.
-2. Upload `notebooks/01_commits_as_provenance.py`.
+2. Upload `01_commits_as_provenance.py`.
 3. Click "Run all".
 
 ### Notebook 2 on molab
 
-1. Open molab.marimo.io, create a new notebook, and upload `notebooks/02_agentic_integration_shootout.py`.
+1. Open molab.marimo.io, create a new notebook, and upload `02_agentic_integration_shootout.py`.
 2. In the secrets pane of the developer panel, set `OPENAI_API_KEY` and `ICB_ARRAYLAKE_ORG`.
 3. Optional: to train scvi and scanvi on a GPU, click the notebook specs button in the app header and switch on the GPU. Then set the secret `ICB_ACCELERATOR=gpu`. With the GPU, a run is about one third shorter.
 4. Optional: to give the agents more iterations, set the secret `ICB_ITERATION_SCALE`, for example `2`. Also raise `ICB_MAX_MINUTES`, for example to `120`.

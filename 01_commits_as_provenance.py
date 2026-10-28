@@ -54,7 +54,7 @@ with app.setup(hide_code=True):
     import zarr
     from anndata import AnnData
 
-    DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+    DATA_DIR = Path(__file__).resolve().parent / "data"
 
     PBMC3K_URL = "https://exampledata.scverse.org/scanpy/pbmc3k_raw.h5ad"
     PBMC3K_FILENAME = "pbmc3k_raw.h5ad"

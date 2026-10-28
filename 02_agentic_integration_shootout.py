@@ -124,7 +124,7 @@ with app.setup(hide_code=True):
     # Lightning accelerator names that `ICB_ACCELERATOR` accepts.
     ACCELERATORS = ("cpu", "gpu", "auto")
 
-    DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+    DATA_DIR = Path(__file__).resolve().parent / "data"
 
     IMMUNE_URL = "https://ndownloader.figshare.com/files/25717328"
     IMMUNE_FILENAME = "Immune_ALL_human.h5ad"
