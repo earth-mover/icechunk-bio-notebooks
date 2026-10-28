@@ -158,16 +158,17 @@ def _(repo, show_commit):
     raw = load_pbmc3k()
 
     snap_init = repo.lookup_branch("main")
-    _session = repo.writable_session("main")
-    anndata.io.write_elem(zarr.open_group(_session.store), "/", raw)
-    snap_ingest = _session.commit(
-        "ingest: pooch download, SHA-256 verified",
+    with repo.transaction(
+        "main",
+        message="ingest: pooch download, SHA-256 verified",
         metadata={
             "stage": "ingest",
             "params": {"url": PBMC3K_URL, "sha256": PBMC3K_SHA256, "n_obs": raw.n_obs, "n_vars": raw.n_vars},
             "versions": package_versions(),
         },
-    )
+    ) as _store:
+        anndata.io.write_elem(zarr.open_group(_store), "/", raw)
+    snap_ingest = repo.lookup_branch("main")
     show_commit(snap_init, snap_ingest)
     return raw, snap_ingest
 
@@ -181,16 +182,17 @@ def _(raw, repo, show_commit, snap_ingest):
     sc.pp.calculate_qc_metrics(adata, qc_vars=["mt"], inplace=True, log1p=False)
     adata = adata[(adata.obs["n_genes_by_counts"] < 2500) & (adata.obs["pct_counts_mt"] < 5)].copy()
 
-    _session = repo.writable_session("main")
-    anndata.io.write_elem(zarr.open_group(_session.store), "/", adata)
-    snap_qc = _session.commit(
-        "qc: scanpy.pp.filter_cells, filter_genes, calculate_qc_metrics",
+    with repo.transaction(
+        "main",
+        message="qc: scanpy.pp.filter_cells, filter_genes, calculate_qc_metrics",
         metadata={
             "stage": "qc",
             "params": {"min_genes": 200, "min_cells": 3, "max_genes": 2500, "max_pct_mt": 5},
             "versions": package_versions(),
         },
-    )
+    ) as _store:
+        anndata.io.write_elem(zarr.open_group(_store), "/", adata)
+    snap_qc = repo.lookup_branch("main")
     show_commit(snap_ingest, snap_qc)
     return adata, snap_qc
 
@@ -202,13 +204,14 @@ def _(adata, repo, show_commit, snap_qc):
     sc.pp.log1p(_norm)
     adata.layers["norm"] = _norm.X
 
-    _session = repo.writable_session("main")
-    _root = zarr.open_group(_session.store)
-    anndata.io.write_elem(_root["layers"], "norm", adata.layers["norm"])
-    snap_normalize = _session.commit(
-        "normalize: scanpy.pp.normalize_total, log1p",
+    with repo.transaction(
+        "main",
+        message="normalize: scanpy.pp.normalize_total, log1p",
         metadata={"stage": "normalize", "params": {"target_sum": 1e4}, "versions": package_versions()},
-    )
+    ) as _store:
+        _root = zarr.open_group(_store)
+        anndata.io.write_elem(_root["layers"], "norm", adata.layers["norm"])
+    snap_normalize = repo.lookup_branch("main")
     show_commit(snap_qc, snap_normalize)
     return (snap_normalize,)
 
@@ -220,24 +223,25 @@ def _(adata, repo, show_commit, snap_normalize):
     sc.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
     sc.tl.umap(adata)
 
-    _session = repo.writable_session("main")
-    _root = zarr.open_group(_session.store)
-    anndata.io.write_elem(_root, "var", adata.var)
-    for _name in ("X_pca", "X_umap"):
-        anndata.io.write_elem(_root["obsm"], _name, adata.obsm[_name])
-    anndata.io.write_elem(_root["varm"], "PCs", adata.varm["PCs"])
-    for _name in ("distances", "connectivities"):
-        anndata.io.write_elem(_root["obsp"], _name, adata.obsp[_name])
-    for _name in ("hvg", "pca", "neighbors", "umap"):
-        anndata.io.write_elem(_root["uns"], _name, adata.uns[_name])
-    snap_embed = _session.commit(
-        "embed: scanpy.pp.highly_variable_genes, pca, neighbors; scanpy.tl.umap",
+    with repo.transaction(
+        "main",
+        message="embed: scanpy.pp.highly_variable_genes, pca, neighbors; scanpy.tl.umap",
         metadata={
             "stage": "embed",
             "params": {"n_top_genes": 2000, "n_comps": 50, "n_neighbors": 10, "n_pcs": 40},
             "versions": package_versions(),
         },
-    )
+    ) as _store:
+        _root = zarr.open_group(_store)
+        anndata.io.write_elem(_root, "var", adata.var)
+        for _name in ("X_pca", "X_umap"):
+            anndata.io.write_elem(_root["obsm"], _name, adata.obsm[_name])
+        anndata.io.write_elem(_root["varm"], "PCs", adata.varm["PCs"])
+        for _name in ("distances", "connectivities"):
+            anndata.io.write_elem(_root["obsp"], _name, adata.obsp[_name])
+        for _name in ("hvg", "pca", "neighbors", "umap"):
+            anndata.io.write_elem(_root["uns"], _name, adata.uns[_name])
+    snap_embed = repo.lookup_branch("main")
     show_commit(snap_normalize, snap_embed)
     return (snap_embed,)
 
@@ -246,18 +250,19 @@ def _(adata, repo, show_commit, snap_normalize):
 def _(adata, repo, show_commit, snap_embed):
     sc.tl.leiden(adata, resolution=0.9, flavor="igraph", n_iterations=2, directed=False, key_added="leiden")
 
-    _session = repo.writable_session("main")
-    _root = zarr.open_group(_session.store)
-    anndata.io.write_elem(_root, "obs", adata.obs)
-    anndata.io.write_elem(_root["uns"], "leiden", adata.uns["leiden"])
-    snap_cluster = _session.commit(
-        "cluster: scanpy.tl.leiden",
+    with repo.transaction(
+        "main",
+        message="cluster: scanpy.tl.leiden",
         metadata={
             "stage": "cluster",
             "params": {"resolution": 0.9, "n_iterations": 2, "flavor": "igraph"},
             "versions": package_versions(),
         },
-    )
+    ) as _store:
+        _root = zarr.open_group(_store)
+        anndata.io.write_elem(_root, "obs", adata.obs)
+        anndata.io.write_elem(_root["uns"], "leiden", adata.uns["leiden"])
+    snap_cluster = repo.lookup_branch("main")
     show_commit(snap_embed, snap_cluster)
     return (snap_cluster,)
 
@@ -295,12 +300,13 @@ def annotate_clusters(adata: AnnData, markers: dict[str, list[str]]) -> pd.Categ
 def _(adata, repo, show_commit, snap_cluster):
     adata.obs["cell_type"] = annotate_clusters(adata, MARKERS_V1)
 
-    _session = repo.writable_session("main")
-    anndata.io.write_elem(zarr.open_group(_session.store), "obs", adata.obs)
-    snap_annotate = _session.commit(
-        "annotate: highest mean z-scored layers['norm'] marker expression per Leiden cluster",
+    with repo.transaction(
+        "main",
+        message="annotate: highest mean z-scored layers['norm'] marker expression per Leiden cluster",
         metadata={"stage": "annotate", "params": {"markers": MARKERS_V1}, "versions": package_versions()},
-    )
+    ) as _store:
+        anndata.io.write_elem(zarr.open_group(_store), "obs", adata.obs)
+    snap_annotate = repo.lookup_branch("main")
     repo.create_tag("v1", snap_annotate)
     labels_v1 = adata.obs["cell_type"].copy()
     show_commit(snap_cluster, snap_annotate)
@@ -415,12 +421,13 @@ def _():
 def _(adata, labels_v1, repo, show_commit, snap_annotate):
     adata.obs["cell_type"] = annotate_clusters(adata, MARKERS_FIXED)
 
-    _session = repo.writable_session("main")
-    anndata.io.write_elem(zarr.open_group(_session.store), "obs", adata.obs)
-    snap_fix = _session.commit(
-        "annotate_fix: add CD8A and CD8B as CD8 T markers",
+    with repo.transaction(
+        "main",
+        message="annotate_fix: add CD8A and CD8B as CD8 T markers",
         metadata={"stage": "annotate_fix", "params": {"markers": MARKERS_FIXED}, "versions": package_versions()},
-    )
+    ) as _store:
+        anndata.io.write_elem(zarr.open_group(_store), "obs", adata.obs)
+    snap_fix = repo.lookup_branch("main")
     labels_fixed = adata.obs["cell_type"]
     assert "CD8 T" in set(labels_fixed)
     assert (labels_v1[labels_fixed == "CD8 T"] == "CD4 T").all()
@@ -576,13 +583,13 @@ def load_pbmc3k() -> anndata.AnnData:
 
 
 @app.function(hide_code=True)
-def anndata_store_root(session: icechunk.Session) -> zarr.Group:
-    return zarr.open_group(session.store, mode="r" if session.read_only else "a")
+def anndata_store_root(store: icechunk.IcechunkStore) -> zarr.Group:
+    return zarr.open_group(store, mode="r" if store.read_only else "a")
 
 
 @app.function(hide_code=True)
-def read_adata(session: icechunk.Session) -> anndata.AnnData:
-    return anndata.io.read_elem(anndata_store_root(session))
+def read_adata(store: icechunk.IcechunkStore) -> anndata.AnnData:
+    return anndata.io.read_elem(anndata_store_root(store))
 
 
 @app.function(hide_code=True)
@@ -614,7 +621,7 @@ def h5ad_snapshot_bytes(
     """Total size of one full `.h5ad` copy of each snapshot."""
     with tempfile.TemporaryDirectory() as tmp:
         for i, snapshot in enumerate(snapshot_ids):
-            adata = read_adata(repo.readonly_session(snapshot_id=snapshot))
+            adata = read_adata(repo.readonly_session(snapshot_id=snapshot).store)
             adata.write_h5ad(Path(tmp) / f"{i}.h5ad", compression=compression)
         return directory_bytes(Path(tmp))
 

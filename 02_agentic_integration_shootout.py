@@ -161,8 +161,10 @@ with app.setup(hide_code=True):
         "scanvi": {"max_epochs": (int, 5, 20)},
     }
 
-    # Iteration limits per agent at ICB_ITERATION_SCALE=1.
-    ITERATION_LIMITS = {"unintegrated": 1, "harmony": 4, "combat": 2, "scanorama": 4, "bbknn": 3, "scvi": 3, "scanvi": 3}
+    # Iteration limits per agent at ICB_ITERATION_SCALE=1. A fast method gets more iterations in the time of the slow scvi agent.
+    ITERATION_LIMITS = {"unintegrated": 1, "harmony": 8, "combat": 4, "scanorama": 8, "bbknn": 6, "scvi": 3, "scanvi": 3}
+    # The scale when ICB_ITERATION_SCALE is not set.
+    ITERATION_SCALE = 1
 
     # Harmony params of the by-hand iteration: the harmonypy defaults.
     BY_HAND_PARAMS = {"theta": 2.0, "sigma": 0.1}
@@ -483,7 +485,7 @@ Goal: the highest "Total" score. Total = 0.6 * Bio conservation + 0.4 * Batch co
 Rules:
 - You have at most {limit} run_and_score calls. One call takes from 30 seconds to some minutes.
 - Make one run_and_score call at a time, and use each result to choose the next params.
-- Stop when the Total score stops improving, or when the limit is reached. Then call finish.
+- Stop after 2 run_and_score calls in a row that do not raise your best Total, or when the limit is reached. Then call finish.
 - Do not call run_and_score again with params that you already tried.
 """
 
@@ -563,7 +565,7 @@ def _(store_choice):
         ICB_LLM=mo.ui.dropdown(sorted(API_KEY_BY_PROVIDER), value=llm_provider(os.environ)),
         **{name: mo.ui.text(value=os.environ.get(name, "")) for name in _store_names},
         ICB_ACCELERATOR=mo.ui.dropdown(list(ACCELERATORS), value=training_accelerator(os.environ)),
-        ICB_ITERATION_SCALE=mo.ui.number(start=1, step=1, value=int(os.environ.get("ICB_ITERATION_SCALE", "1"))),
+        ICB_ITERATION_SCALE=mo.ui.number(start=1, step=1, value=int(os.environ.get("ICB_ITERATION_SCALE", ITERATION_SCALE))),
         ICB_MAX_MINUTES=mo.ui.number(value=max_minutes(os.environ)),
         ICB_NB2_DRY_RUN=mo.ui.checkbox(value=enabled(os.environ)),
     )
@@ -682,11 +684,11 @@ def ensure_base(repo: icechunk.Repository) -> str:
     if BUILD_BRANCH in repo.list_branches():
         repo.delete_branch(BUILD_BRANCH)
     repo.create_branch(BUILD_BRANCH, repo.lookup_branch("main"))
-    session = repo.writable_session(BUILD_BRANCH)
-    write_adata(session, build_base())
-    # Method branches write under /results; the base owns the parent group, so branches do not all create it.
-    write_element(session, "results", {})
-    snapshot = session.commit("Add immune base with HVGs and PCA")
+    with repo.transaction(BUILD_BRANCH, message="Add immune base with HVGs and PCA") as store:
+        write_adata(store, build_base())
+        # Method branches write under /results; the base owns the parent group, so branches do not all create it.
+        write_element(store, "results", {})
+    snapshot = repo.lookup_branch(BUILD_BRANCH)
     repo.create_tag(BASE_TAG, snapshot)
     return snapshot
 
@@ -984,19 +986,19 @@ def score(adata: AnnData, method: str, embedding: np.ndarray, n_jobs: int = -1) 
 
 @app.function
 def write_method_output(
-    session: icechunk.Session, method: str, out: MethodOutput, params: dict, metrics: dict, reasoning: str
+    store: icechunk.IcechunkStore, method: str, out: MethodOutput, params: dict, metrics: dict, reasoning: str
 ) -> None:
     """Writes only the paths of `method`. `iteration` counts the writes on this branch, from 1."""
     try:
-        iteration = int(read_element(session, f"uns/{method}/iteration")) + 1
+        iteration = int(read_element(store, f"uns/{method}/iteration")) + 1
     except KeyError:
         iteration = 1
-    write_element(session, f"obsm/X_{method}", out.embedding)
-    write_element(session, f"obsp/{method}_connectivities", out.connectivities)
-    write_element(session, f"obsp/{method}_distances", out.distances)
-    write_element(session, f"results/{method}/labels", out.labels)
+    write_element(store, f"obsm/X_{method}", out.embedding)
+    write_element(store, f"obsp/{method}_connectivities", out.connectivities)
+    write_element(store, f"obsp/{method}_distances", out.distances)
+    write_element(store, f"results/{method}/labels", out.labels)
     record = {"params": params, "metrics": metrics, "reasoning": reasoning, "iteration": iteration}
-    write_element(session, f"uns/{method}", record)
+    write_element(store, f"uns/{method}", record)
 
 
 
@@ -1023,12 +1025,13 @@ def one_iteration_by_hand(repo: icechunk.Repository, run: Run) -> dict:
     repo.create_branch(branch, run.base)
     # The branch goes also on a failure, so a rerun can create it again.
     try:
+        # An explicit session, not repo.transaction: the commit metadata needs metrics from the data that it reads.
         session = repo.writable_session(branch)
-        adata = read_adata(session)
+        adata = read_adata(session.store)
 
         out = run_method(adata, "harmony", BY_HAND_PARAMS)
         metrics = score(adata, "harmony", out.embedding)
-        write_method_output(session, "harmony", out, BY_HAND_PARAMS, metrics, "by hand")
+        write_method_output(session.store, "harmony", out, BY_HAND_PARAMS, metrics, "by hand")
         snapshot = session.commit("harmony by hand", metadata={"params": BY_HAND_PARAMS, "metrics": metrics})
 
         diff = repo.diff(from_snapshot_id=run.base, to_snapshot_id=snapshot)
@@ -1156,7 +1159,7 @@ def branch_scores(repo: icechunk.Repository, run: Run, methods: list[str]) -> di
         records = {}
         for snapshot in ancestry[: ancestry.index(fork) if fork in ancestry else None]:
             try:
-                records[snapshot] = plain_json(read_element(repo.readonly_session(snapshot_id=snapshot), f"uns/{method}"))
+                records[snapshot] = plain_json(read_element(repo.readonly_session(snapshot_id=snapshot).store, f"uns/{method}"))
             except KeyError:
                 records[snapshot] = {}
         scored = [s for s, r in records.items() if "Total" in (r.get("metrics") or {})]
@@ -1191,12 +1194,12 @@ def check_lineage(repo: icechunk.Repository, run: Run, branch: str) -> str | Non
 
 @app.function
 def append_column(repo: icechunk.Repository, branch: str) -> str:
-    session = repo.writable_session(branch)
-    obs = zarr.open_group(session.store, mode="a")["obs"]
-    order = list(obs.attrs["column-order"])
-    if PROMOTED_COLUMN not in order:
-        obs.attrs["column-order"] = [*order, PROMOTED_COLUMN]
-    return session.commit(f"Add {PROMOTED_COLUMN} to obs column-order")
+    with repo.transaction(branch, message=f"Add {PROMOTED_COLUMN} to obs column-order") as store:
+        obs = zarr.open_group(store, mode="a")["obs"]
+        order = list(obs.attrs["column-order"])
+        if PROMOTED_COLUMN not in order:
+            obs.attrs["column-order"] = [*order, PROMOTED_COLUMN]
+    return repo.lookup_branch(branch)
 
 
 
@@ -1343,7 +1346,7 @@ def _(budget, evaluator, repo, run):
     mo.stop(bool(_skip), mo.md(_skip or ""))
     mo.stop(evaluator["winner"] is None, mo.md("The evaluator promoted no winner, so `main` holds only the base."))
     _winner = evaluator["winner"]
-    _adata = read_adata(repo.readonly_session(branch=run.main))
+    _adata = read_adata(repo.readonly_session(branch=run.main).store)
     _agreement, _crosstab = label_agreement(_adata)
     _fig = umap_figure(
         umap_coords(_adata, _winner), _adata.obs, [LABEL_KEY, PROMOTED_COLUMN], f"UMAP of X_{_winner}"
@@ -1779,7 +1782,7 @@ def training_accelerator(env: Mapping[str, str]) -> str:
 @app.function(hide_code=True)
 def iteration_limits(env: Mapping[str, str]) -> dict[str, int]:
     """Iteration limits per agent. `ICB_ITERATION_SCALE` multiplies each one, but unintegrated has one parameter and stays at 1."""
-    value = env.get("ICB_ITERATION_SCALE", "1")
+    value = env.get("ICB_ITERATION_SCALE", str(ITERATION_SCALE))
     if not value.isdigit() or int(value) < 1:
         raise ValueError(f"ICB_ITERATION_SCALE must be a whole number of 1 or more, not {value!r}")
     return {m: n if m == "unintegrated" else n * int(value) for m, n in ITERATION_LIMITS.items()}
@@ -1879,31 +1882,31 @@ def load_immune() -> anndata.AnnData:
 
 
 @app.function(hide_code=True)
-def anndata_store_root(session: icechunk.Session) -> zarr.Group:
-    return zarr.open_group(session.store, mode="r" if session.read_only else "a")
+def anndata_store_root(store: icechunk.IcechunkStore) -> zarr.Group:
+    return zarr.open_group(store, mode="r" if store.read_only else "a")
 
 
 @app.function(hide_code=True)
-def write_adata(session: icechunk.Session, adata: anndata.AnnData) -> None:
-    anndata.io.write_elem(anndata_store_root(session), "/", adata)
+def write_adata(store: icechunk.IcechunkStore, adata: anndata.AnnData) -> None:
+    anndata.io.write_elem(anndata_store_root(store), "/", adata)
 
 
 @app.function(hide_code=True)
-def read_adata(session: icechunk.Session) -> anndata.AnnData:
-    return anndata.io.read_elem(anndata_store_root(session))
+def read_adata(store: icechunk.IcechunkStore) -> anndata.AnnData:
+    return anndata.io.read_elem(anndata_store_root(store))
 
 
 @app.function(hide_code=True)
-def write_element(session: icechunk.Session, key: str, value) -> None:
+def write_element(store: icechunk.IcechunkStore, key: str, value) -> None:
     # write_elem rejects "/" in keys, so write into the parent group, which is created if missing.
     parent, _, name = key.rpartition("/")
-    root = anndata_store_root(session)
+    root = anndata_store_root(store)
     anndata.io.write_elem(root.require_group(parent) if parent else root, name, value)
 
 
 @app.function(hide_code=True)
-def read_element(session: icechunk.Session, key: str):
-    return anndata.io.read_elem(anndata_store_root(session)[key])
+def read_element(store: icechunk.IcechunkStore, key: str):
+    return anndata.io.read_elem(anndata_store_root(store)[key])
 
 
 @app.function(hide_code=True)
@@ -2342,8 +2345,9 @@ class MethodTools:
             return {"error": refusal}
         iteration = self.iterations + 1
         t0 = time.perf_counter()
+        # An explicit session, not repo.transaction: the checkpoint and two timers sit between write and commit.
         session = self.repo.writable_session(self.branch)
-        write_method_output(session, self.method, out, params, metrics, reasoning)
+        write_method_output(session.store, self.method, out, params, metrics, reasoning)
         write_s = time.perf_counter() - t0
         wait_start = time.perf_counter()
         if self.checkpoint:
@@ -2485,7 +2489,7 @@ def run_method_agent(
         if n_threads:
             torch.set_num_threads(n_threads)
         repo = repository_from_env(env)
-        adata = read_adata(repo.readonly_session(snapshot_id=run.base))
+        adata = read_adata(repo.readonly_session(snapshot_id=run.base).store)
         ensure_method_branch(repo, run, method)
         pretrained = pretrain_scvi(adata) if method == "scanvi" else None
         tools = MethodTools(
@@ -2865,7 +2869,7 @@ def scripted_agent(
 
             torch.set_num_threads(n_threads)
         repo = open_repo(env)
-        adata = read_adata(repo.readonly_session(snapshot_id=run.base))
+        adata = read_adata(repo.readonly_session(snapshot_id=run.base).store)
         ensure_method_branch(repo, run, method)
         pretrained = pretrain_scvi(adata, DRY_RUN_PRETRAIN_EPOCHS) if method == "scanvi" else None
         tools = MethodTools(
@@ -3133,20 +3137,23 @@ def commit_output(
     metrics: dict | None = None, reasoning: str = "fixed params",
 ) -> str:
     """Commits `out` as iteration 1 on the method branch, which starts at the run base."""
-    session = repo.writable_session(ensure_method_branch(repo, run, method))
-    write_method_output(session, method, out, params, metrics or {}, reasoning)
-    return session.commit(f"{method} iter 1: {reasoning}", metadata={"params": params, "iteration": 1})
+    branch = ensure_method_branch(repo, run, method)
+    with repo.transaction(
+        branch, message=f"{method} iter 1: {reasoning}", metadata={"params": params, "iteration": 1}
+    ) as store:
+        write_method_output(store, method, out, params, metrics or {}, reasoning)
+    return repo.lookup_branch(branch)
 
 
 @app.function(hide_code=True)
 def read_output(repo: icechunk.Repository, snapshot: str, method: str) -> MethodOutput:
     session = repo.readonly_session(snapshot_id=snapshot)
-    record = plain_json(read_element(session, f"uns/{method}"))
+    record = plain_json(read_element(session.store, f"uns/{method}"))
     return MethodOutput(
-        embedding=read_element(session, f"obsm/X_{method}"),
-        connectivities=read_element(session, f"obsp/{method}_connectivities"),
-        distances=read_element(session, f"obsp/{method}_distances"),
-        labels=pd.Categorical(read_element(session, f"results/{method}/labels")),
+        embedding=read_element(session.store, f"obsm/X_{method}"),
+        connectivities=read_element(session.store, f"obsp/{method}_connectivities"),
+        distances=read_element(session.store, f"obsp/{method}_distances"),
+        labels=pd.Categorical(read_element(session.store, f"results/{method}/labels")),
         fit_s=record["metrics"].get("fit_seconds", 0.0),
     )
 
@@ -3217,7 +3224,7 @@ def kill_mid_write(
     two outputs; its writer gets SIGKILL before the rename of SIDECAR_KILL_FILE."""
     repo = repo or repository_from_env(env)
     branch = method_branch(run, METHOD)
-    base = read_adata(repo.readonly_session(snapshot_id=run.base))
+    base = read_adata(repo.readonly_session(snapshot_id=run.base).store)
     obs_names = list(base.obs_names)
     first_out = run_method(base, METHOD, SEED_PARAMS)
     first = commit_output(repo, run, METHOD, first_out, SEED_PARAMS, {"fit_seconds": first_out.fit_s}, "seed")
@@ -3229,7 +3236,7 @@ def kill_mid_write(
             agent.kill()
 
         tip = repo.lookup_branch(branch)
-        tip_record = plain_json(read_element(repo.readonly_session(snapshot_id=tip), f"uns/{METHOD}"))
+        tip_record = plain_json(read_element(repo.readonly_session(snapshot_id=tip).store, f"uns/{METHOD}"))
         icechunk_obs = {
             "agent_wrote": killed is not None,
             "agent_exit": (agent.exit or {}).get("exit"),
@@ -3274,11 +3281,13 @@ def requalify(adata: anndata.AnnData) -> anndata.AnnData:
 
 @app.function(hide_code=True)
 def commit_requalified(repo: icechunk.Repository, run: Run, adata: anndata.AnnData) -> str:
-    session = repo.writable_session(run.main)
-    write_adata(session, adata)
-    # The root rewrite drops /results; method branches expect it, as in the base.
-    write_element(session, "results", {})
-    return session.commit(f"Re-QC: drop the cells above the {REQC_QUANTILE:.0%} quantile of n_counts")
+    with repo.transaction(
+        run.main, message=f"Re-QC: drop the cells above the {REQC_QUANTILE:.0%} quantile of n_counts"
+    ) as store:
+        write_adata(store, adata)
+        # The root rewrite drops /results; method branches expect it, as in the base.
+        write_element(store, "results", {})
+    return repo.lookup_branch(run.main)
 
 
 @app.function(hide_code=True)
@@ -3296,7 +3305,7 @@ def mutate_base_after_fork(
     on `run.main` drops the cells with the top 1% of `n_counts`. Then each store tries to use the result."""
     repo = repo or repository_from_env(env)
     branch = method_branch(run, METHOD)
-    base = read_adata(repo.readonly_session(snapshot_id=run.base))
+    base = read_adata(repo.readonly_session(snapshot_id=run.base).store)
     store.write_base(base)
     with tempfile.TemporaryDirectory() as signals:
         agent = AgentProcess(produce, env, run, 1, budget, signals)
@@ -3432,7 +3441,7 @@ def promote_and_discard(
     The parent then promotes Harmony and discards BASELINE: named operations on Icechunk, file operations on the sidecar.
     Records what a reader can list afterwards, and when."""
     repo = repo or repository_from_env(env)
-    adata = read_adata(repo.readonly_session(snapshot_id=run.base))
+    adata = read_adata(repo.readonly_session(snapshot_id=run.base).store)
     obs_names = list(adata.obs_names)
     baseline = run_method(adata, BASELINE, BASELINE_PARAMS)
     commit_output(repo, run, BASELINE, baseline, BASELINE_PARAMS)
@@ -3491,7 +3500,7 @@ def diff_agent(
     """Scenario 4. A Harmony agent with 1 iteration commits one result. Then each store reports what changed."""
     repo = repo or repository_from_env(env)
     head, agent_exit = agent_commit(produce, env, run, budget)
-    obs_names = list(read_element(repo.readonly_session(snapshot_id=run.base), "obs").index)
+    obs_names = list(read_element(repo.readonly_session(snapshot_id=run.base).store, "obs").index)
     store.write_result(METHOD, read_output(repo, head, METHOD), obs_names)
 
     changed = changed_paths(repo, run.base, head)
@@ -3573,7 +3582,7 @@ def run_record(run, **fields) -> dict:
 
 @app.function(hide_code=True)
 def cell_count(session: icechunk.Session) -> int:
-    return len(read_element(session, "obs"))
+    return len(read_element(session.store, "obs"))
 
 
 @app.function(hide_code=True)
@@ -3602,7 +3611,7 @@ def open_times(repo: icechunk.Repository, branch: str) -> list[dict]:
         t0 = time.perf_counter()
         session = repo.readonly_session(snapshot_id=snap.id)
         try:
-            read_element(session, "obs")
+            read_element(session.store, "obs")
             has_obs = True
         except (KeyError, zarr.errors.GroupNotFoundError):  # the first snapshot of a repo is empty
             has_obs = False

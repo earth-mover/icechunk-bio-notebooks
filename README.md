@@ -63,7 +63,7 @@ export ICB_ARRAYLAKE_ORG=<your org>
 pixi run --script 02_agentic_integration_shootout.py
 ```
 
-A run takes about 25 to 50 minutes. With the default models, a run costs about US$0.015.
+A run takes about 25 to 50 minutes. With the default models, a run costs about US$0.015. A larger iteration scale can make a run longer.
 The notebook stops all agents at US$5 of API cost or after 90 minutes. The "Time cap in minutes" setting changes the time cap.
 
 To try the notebook with no API key and no API cost, select "Dry run" in the settings form. Scripts with fixed parameters then replace the agents and the evaluator. The dry run still writes to the store.
@@ -120,7 +120,7 @@ An environment variable with the name in the table sets the start value of its f
 | Arraylake org | `ICB_ARRAYLAKE_ORG` | your org; required with Arraylake | the notebook uses the repo `<org>/icechunk-bio-nb2` and creates it on first use |
 | S3 bucket, S3 prefix, S3 region | `ICB_S3_BUCKET`, `ICB_S3_PREFIX`, `ICB_S3_REGION` | your bucket; required with S3 | the S3 location |
 | Device for scvi and scanvi | `ICB_ACCELERATOR` | `cpu` (default), `gpu`, `auto` | the other methods and the scIB scoring use the CPU |
-| Iteration scale | `ICB_ITERATION_SCALE` | a whole number, `1` (default) or more | multiplies the iteration limit of each agent; the unintegrated baseline stays at 1 |
+| Iteration scale | `ICB_ITERATION_SCALE` | a whole number of 1 or more, `1` (default) | multiplies the iteration limit of each agent; the unintegrated baseline stays at 1 |
 | Time cap in minutes | `ICB_MAX_MINUTES` | minutes, `90` (default) | the time cap of the notebook; a larger scale needs more time |
 | Dry run | `ICB_NB2_DRY_RUN` | off (default), on (`1`) | a run with no LLM call |
 
