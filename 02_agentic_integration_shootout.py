@@ -78,7 +78,7 @@ with app.setup(hide_code=True):
     import tempfile
     import time
     import warnings
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, MutableMapping
     from dataclasses import dataclass
     from pathlib import Path
 
@@ -381,7 +381,7 @@ def _():
     Each scenario runs on Icechunk and on a careful sidecar-file baseline.
 
     Two caps apply to the whole notebook, failure scenarios included: US$5 of API cost and 90 minutes of wall-clock time.
-    `ICB_MAX_MINUTES` changes the time cap.
+    The **Time cap in minutes** field of the settings form changes the time cap.
     Code enforces both caps.
     You pay the API cost to your LLM provider.
     The notebook shows the actual cost and time per agent.
@@ -500,57 +500,110 @@ def _(env):
 
 @app.cell
 def _():
-    env = dict(os.environ)
+    mo.md(r"""
+    ## Settings
+
+    Choose the store first, then the settings in the form below it. Then click **Start the run**.
+    The notebook waits for this click. Each click starts a new run, with new API cost.
+
+    - **Store** (`ICB_STORE`): `arraylake` (the default) or `s3`.
+      The form shows only the fields of the chosen store: the **Arraylake org**, or the **S3 bucket**, **S3 prefix** and **S3 region**.
+      A change of the store makes a new form, with the start values again.
+    - **LLM provider** (`ICB_LLM`): `openai` (the default) or `anthropic`.
+    - **Device for scvi and scanvi** (`ICB_ACCELERATOR`): `cpu` (the default), `gpu` or `auto`. The other methods run on the CPU.
+    - **Iteration scale** (`ICB_ITERATION_SCALE`): a whole number, 1 by default. It multiplies the iteration limit of each agent. The unintegrated baseline stays at 1 iteration.
+    - **Time cap in minutes** (`ICB_MAX_MINUTES`): 90 by default. A larger scale needs more time.
+    - **Dry run** (`ICB_NB2_DRY_RUN`): scripts with fixed parameters replace the agents and the evaluator. A dry run needs no API key and has no API cost.
+
+    An environment variable with the name in brackets sets the start value of its field.
+    In script mode (`pixi run --script`), the notebook uses the start values and does not wait for a click.
+
+    The secrets come only from environment variables. On molab, set them in the secrets pane.
+
+    - `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, for the LLM provider.
+      The key comes from the API console of the provider. A ChatGPT or claude.ai subscription does not give API access.
+    - `ARRAYLAKE_TOKEN`, an Arraylake API token. It is optional: with no token, the notebook asks you to log in.
+    - For S3, the AWS credentials come from the standard AWS environment.
+
+    The OpenAI backend chains the turns of a conversation with `previous_response_id`.
+    Thus OpenAI stores the responses on its servers for 30 days by default.
+
+    The cell after the form stops the notebook if a setting is missing.
+    """)
+    return
+
+
+@app.cell
+def _():
+    # A wrong environment value stops the notebook here, with the error of that setting.
+    missing_settings(os.environ)
+    store_choice = mo.ui.dropdown(sorted(REQUIRED_BY_STORE), value=store_kind(os.environ), label="Store")
+    return (store_choice,)
+
+
+@app.cell
+def _(store_choice):
+    # The form holds only the fields of the chosen store, so a store change makes a new form.
+    _labels = {
+        "ICB_ARRAYLAKE_ORG": "Arraylake org", "ICB_S3_BUCKET": "S3 bucket", "ICB_S3_PREFIX": "S3 prefix",
+        "ICB_S3_REGION": "S3 region",
+    }
+    _store_names = REQUIRED_BY_STORE[store_choice.value]
+    settings_fields = mo.md("\n".join([
+        "- LLM provider: {ICB_LLM}",
+        *(f"- {_labels[name]}: {{{name}}}" for name in _store_names),
+        "- Device for scvi and scanvi: {ICB_ACCELERATOR}",
+        "- Iteration scale: {ICB_ITERATION_SCALE}",
+        "- Time cap in minutes: {ICB_MAX_MINUTES}",
+        "- Dry run: {ICB_NB2_DRY_RUN}",
+    ])).batch(
+        ICB_LLM=mo.ui.dropdown(sorted(API_KEY_BY_PROVIDER), value=llm_provider(os.environ)),
+        **{name: mo.ui.text(value=os.environ.get(name, "")) for name in _store_names},
+        ICB_ACCELERATOR=mo.ui.dropdown(list(ACCELERATORS), value=training_accelerator(os.environ)),
+        ICB_ITERATION_SCALE=mo.ui.number(start=1, step=1, value=int(os.environ.get("ICB_ITERATION_SCALE", "1"))),
+        ICB_MAX_MINUTES=mo.ui.number(value=max_minutes(os.environ)),
+        ICB_NB2_DRY_RUN=mo.ui.checkbox(value=enabled(os.environ)),
+    )
+    settings_form = settings_fields.form(submit_button_label="Start the run")
+    mo.vstack([store_choice, settings_form])
+    return settings_fields, settings_form
+
+
+@app.cell
+def _(settings_fields, settings_form, store_choice):
+    # Spawned agents copy os.environ, so a started run writes the settings there. Script mode has no click.
+    started = settings_form.value is not None or not mo.running_in_notebook()
+    env = apply_settings({"ICB_STORE": store_choice.value, **(settings_form.value or settings_fields.value)}, started)
     DRY_RUN = enabled(env)
     if DRY_RUN:
         print("DRY RUN: no LLM call. Scripts with fixed parameters replace the agents and the evaluator.")
     mo.callout(
         mo.md(
-            "**Dry run: no LLM.** `ICB_NB2_DRY_RUN=1` is set. "
+            "**Dry run: no LLM.** "
             "Scripts with fixed parameters replace the 7 method agents and the evaluator. "
             "The method fits, scores, commits, promotion and GC are real. "
             "The dry run needs no API key, and its API cost is zero."
         ),
         kind="warn",
     ) if DRY_RUN else None
-    return DRY_RUN, env
+    return DRY_RUN, env, started
 
 
 @app.cell
-def _():
-    mo.md(r"""
-    ## Settings
-
-    The notebook reads its settings from environment variables:
-
-    - `ICB_LLM`: `openai` (the default) or `anthropic`.
-    - `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, for the provider in `ICB_LLM`.
-      The key comes from the API console of the provider. A ChatGPT or claude.ai subscription does not give API access.
-    - `ICB_STORE`: `arraylake` (the default) or `s3`.
-    - For Arraylake: `ICB_ARRAYLAKE_ORG`. The notebook asks you to log in when it needs to.
-      `ARRAYLAKE_TOKEN`, an Arraylake API token, skips the login.
-    - For S3: `ICB_S3_BUCKET`, `ICB_S3_PREFIX` and `ICB_S3_REGION`. The AWS credentials come from the standard AWS environment.
-    - `ICB_ACCELERATOR`: `cpu` (the default), `gpu` or `auto`. The value `gpu` trains scvi and scanvi on a GPU. The other methods run on the CPU.
-    - `ICB_ITERATION_SCALE`: a whole number, 1 by default. It multiplies the iteration limit of each agent. The unintegrated baseline stays at 1 iteration.
-    - `ICB_MAX_MINUTES`: the time cap of the notebook in minutes, 90 by default. A larger scale needs more time.
-
-    The OpenAI backend chains the turns of a conversation with `previous_response_id`.
-    Thus OpenAI stores the responses on its servers for 30 days by default.
-
-    The cell below stops the notebook if a setting is missing.
-    """)
-    return
-
-
-@app.cell
-def _(DRY_RUN, env):
+def _(DRY_RUN, env, started):
+    mo.stop(not started, mo.md("The notebook waits for **Start the run** in the form above."))
     missing = dry_run_missing_settings(env)
     if missing:
         print("Missing settings:", ", ".join(missing))
     mo.stop(
         bool(missing),
-        mo.callout(mo.md(f"Set these environment variables, then run the notebook again: `{'`, `'.join(missing)}`"),
-                   kind="danger"),
+        mo.callout(
+            mo.md(
+                f"Missing: `{'`, `'.join(missing)}`. Set an API key as an environment variable, then restart the kernel. "
+                "Set the other names in the settings form, then click **Start the run** again."
+            ),
+            kind="danger",
+        ),
     )
     provider = llm_provider(env)
     models = MODELS[provider]
@@ -1740,6 +1793,28 @@ def max_minutes(env: Mapping[str, str]) -> float:
     if not minutes > 0:
         raise ValueError(f"ICB_MAX_MINUTES must be a number of minutes above 0, not {value!r}")
     return minutes
+
+
+@app.function(hide_code=True)
+def settings_env(values: Mapping[str, object]) -> dict[str, str]:
+    """Environment strings for the settings form values. A checkbox gives "1" or ""; a whole number has no decimals."""
+    def text(value):
+        if isinstance(value, bool):
+            return "1" if value else ""
+        if isinstance(value, (int, float)):
+            return str(int(value)) if float(value).is_integer() else str(value)
+        return value
+
+    return {name: text(value) for name, value in values.items()}
+
+
+@app.function(hide_code=True)
+def apply_settings(values: Mapping[str, object], started: bool, environ: MutableMapping[str, str] = os.environ) -> dict:
+    """The run settings: `environ` plus the form values. Only a started run writes them to `environ`."""
+    settings = settings_env(values)
+    if started:
+        environ.update(settings)
+    return {**environ, **settings}
 
 
 @app.function(hide_code=True)

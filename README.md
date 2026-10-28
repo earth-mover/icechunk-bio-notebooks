@@ -41,26 +41,32 @@ To run a stage again, restart the kernel and run all cells again.
 
 1. Get an API key from the OpenAI API console. A ChatGPT subscription does not give API access. To use Anthropic instead, see "Notebook 2 settings" below.
 2. Get a store. The default is Arraylake, and its free tier is enough. You need the name of your Arraylake org.
-3. Set the two required variables:
+3. Set the API key. It is a secret, so it comes only from an environment variable:
 
    ```bash
    export OPENAI_API_KEY=<your key>
-   export ICB_ARRAYLAKE_ORG=<your org>
    ```
 
-4. Run the notebook:
+4. Open the notebook in marimo and click "Run all" once:
 
    ```bash
-   pixi run --script 02_agentic_integration_shootout.py
+   pixi exec marimo edit --sandbox=pixi 02_agentic_integration_shootout.py
    ```
 
-   To open it in marimo instead, use `pixi exec marimo edit --sandbox=pixi 02_agentic_integration_shootout.py` and click "Run all" once.
-5. Log in to Arraylake. If the notebook has no Arraylake login, its login cell prints a link and a code. Open the link, check that the code matches, and approve. The run then continues. To skip the login, set `ARRAYLAKE_TOKEN` to an Arraylake API token.
+5. In the settings form, type your Arraylake org. Change the other settings if you want to. Then click "Start the run". Each click starts a new paid run.
+6. Log in to Arraylake. If the notebook has no Arraylake login, its login cell prints a link and a code. Open the link, check that the code matches, and approve. The run then continues. To skip the login, set `ARRAYLAKE_TOKEN` to an Arraylake API token.
+
+To run the notebook to the end with no browser, set the settings as environment variables and use script mode. Script mode does not wait for a click:
+
+```bash
+export ICB_ARRAYLAKE_ORG=<your org>
+pixi run --script 02_agentic_integration_shootout.py
+```
 
 A run takes about 25 to 50 minutes. With the default models, a run costs about US$0.015.
-The notebook stops all agents at US$5 of API cost or after 90 minutes. `ICB_MAX_MINUTES` changes the time cap.
+The notebook stops all agents at US$5 of API cost or after 90 minutes. The "Time cap in minutes" setting changes the time cap.
 
-To try the notebook with no API key and no API cost, set `ICB_NB2_DRY_RUN=1`. Scripts with fixed parameters then replace the agents and the evaluator. The dry run still writes to the store.
+To try the notebook with no API key and no API cost, select "Dry run" in the settings form. Scripts with fixed parameters then replace the agents and the evaluator. The dry run still writes to the store.
 
 ## Run on molab
 
@@ -76,12 +82,15 @@ molab reads the dependency list at the top of the notebook and installs it.
 ### Notebook 2 on molab
 
 1. Open molab.marimo.io, create a new notebook, and upload `02_agentic_integration_shootout.py`.
-2. In the secrets pane of the developer panel, set `OPENAI_API_KEY` and `ICB_ARRAYLAKE_ORG`.
-3. Optional: to train scvi and scanvi on a GPU, click the notebook specs button in the app header and switch on the GPU. Then set the secret `ICB_ACCELERATOR=gpu`. With the GPU, a run is about one third shorter.
-4. Optional: to give the agents more iterations, set the secret `ICB_ITERATION_SCALE`, for example `2`. Also raise `ICB_MAX_MINUTES`, for example to `120`.
-5. Click "Run all" once. A second click starts a second paid run.
-6. The login cell prints a link and a code. Open the link, check the code, and approve.
-7. Wait for the run to end. Do not run cells while the run continues, because a new cell run can stop the agents.
+2. In the secrets pane of the developer panel, set `OPENAI_API_KEY`.
+3. Optional: to train scvi and scanvi on a GPU, click the notebook specs button in the app header and switch on the GPU. With the GPU, a run is about one third shorter.
+4. Click "Run all" once.
+5. In the settings form, type your Arraylake org.
+   - If you switched on the GPU, set "Device for scvi and scanvi" to `gpu`.
+   - To give the agents more iterations, raise "Iteration scale", for example to `2`. Also raise "Time cap in minutes", for example to `120`.
+6. Click "Start the run". Each click starts a new paid run.
+7. The login cell prints a link and a code. Open the link, check the code, and approve.
+8. Wait for the run to end. Do not run cells while the run continues, because a new cell run can stop the agents.
 
 The login cell prints your Arraylake email and user ID. An HTML export of the notebook keeps them.
 
@@ -92,18 +101,28 @@ molab shows two kinds of harmless messages for Notebook 2:
 
 ## Notebook 2 settings
 
-| Variable | Required | Values | Purpose |
+Secrets come only from environment variables. On molab, set them in the secrets pane.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `OPENAI_API_KEY` | yes, with OpenAI | the LLM agents and the evaluator |
+| `ANTHROPIC_API_KEY` | yes, with Anthropic | the LLM agents and the evaluator |
+| `ARRAYLAKE_TOKEN` | no | an Arraylake API token; it skips the login cell |
+| AWS credentials | yes, with S3 | from the standard AWS environment |
+
+You set the other settings in the settings form of the notebook. The store is a dropdown above the form. The form shows only the fields of the chosen store.
+An environment variable with the name in the table sets the start value of its field. Script mode uses the start values.
+
+| Form field | Variable | Values | Purpose |
 |---|---|---|---|
-| `OPENAI_API_KEY` | yes, with OpenAI | your key | the LLM agents and the evaluator |
-| `ICB_LLM` | no | `openai` (default), `anthropic` | the LLM provider; `anthropic` needs `ANTHROPIC_API_KEY` |
-| `ICB_STORE` | no | `arraylake` (default), `s3` | where the Icechunk repository lives |
-| `ICB_ARRAYLAKE_ORG` | yes, with Arraylake | your org | the notebook uses the repo `<org>/icechunk-bio-nb2` and creates it on first use |
-| `ARRAYLAKE_TOKEN` | no | an Arraylake API token | skips the login cell |
-| `ICB_S3_BUCKET`, `ICB_S3_PREFIX`, `ICB_S3_REGION` | yes, with S3 | your bucket | the S3 location; AWS credentials come from the standard AWS environment |
-| `ICB_ACCELERATOR` | no | `cpu` (default), `gpu`, `auto` | the device for scvi and scanvi; the other methods and the scIB scoring use the CPU |
-| `ICB_ITERATION_SCALE` | no | a whole number, `1` (default) or more | multiplies the iteration limit of each agent; the unintegrated baseline stays at 1 |
-| `ICB_MAX_MINUTES` | no | minutes, `90` (default) | the time cap of the notebook; a larger scale needs more time |
-| `ICB_NB2_DRY_RUN` | no | `1` | a run with no LLM call |
+| LLM provider | `ICB_LLM` | `openai` (default), `anthropic` | the LLM provider |
+| Store | `ICB_STORE` | `arraylake` (default), `s3` | where the Icechunk repository lives |
+| Arraylake org | `ICB_ARRAYLAKE_ORG` | your org; required with Arraylake | the notebook uses the repo `<org>/icechunk-bio-nb2` and creates it on first use |
+| S3 bucket, S3 prefix, S3 region | `ICB_S3_BUCKET`, `ICB_S3_PREFIX`, `ICB_S3_REGION` | your bucket; required with S3 | the S3 location |
+| Device for scvi and scanvi | `ICB_ACCELERATOR` | `cpu` (default), `gpu`, `auto` | the other methods and the scIB scoring use the CPU |
+| Iteration scale | `ICB_ITERATION_SCALE` | a whole number, `1` (default) or more | multiplies the iteration limit of each agent; the unintegrated baseline stays at 1 |
+| Time cap in minutes | `ICB_MAX_MINUTES` | minutes, `90` (default) | the time cap of the notebook; a larger scale needs more time |
+| Dry run | `ICB_NB2_DRY_RUN` | off (default), on (`1`) | a run with no LLM call |
 
 ## Measured runs
 
