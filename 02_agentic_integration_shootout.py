@@ -111,7 +111,9 @@ with app.setup(hide_code=True):
     from arraylake import Client
     from arraylake.exceptions import ArraylakeClientError, AuthException
     from scib_metrics.benchmark import BatchCorrection, Benchmarker, BioConservation
+    from scib_metrics.utils import diffusion_nn
     from scipy.sparse import issparse
+    from scipy.sparse.csgraph import connected_components
     from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
     # Commit writes one manifest per new array, serially by default.
@@ -172,6 +174,10 @@ with app.setup(hide_code=True):
     # Single-embedding scIB scoring for NB2.
     SCORES = ("Batch correction", "Bio conservation", "Total")
     PCR_CLIPPED = "PCR comparison score is negative"
+    # Methods whose output is a kNN graph. As in scIB, they get only the graph metrics.
+    GRAPH_METHODS = ("bbknn",)
+    # Each graph part adds an eigenvalue 1 for diffusion_nn (n_comps=100). Many parts make its eigsh stall.
+    MAX_GRAPH_PARTS = 50
 
     # Cost and wall-clock caps for the NB2 agents.
     log = logging.getLogger(__name__)
@@ -222,7 +228,7 @@ with app.setup(hide_code=True):
         "harmony": "Harmony corrects the 50 base PCs. theta is the diversity penalty; sigma is the soft-cluster width.",
         "combat": "ComBat corrects the HVG expression, then a scaled PCA with n_comps components gives the embedding.",
         "scanorama": "Scanorama corrects the 50 base PCs by mutual nearest neighbours across batches.",
-        "bbknn": "BBKNN builds a batch-balanced kNN graph on the base PCs. The embedding is the 2-D UMAP of that graph.",
+        "bbknn": "BBKNN builds a batch-balanced kNN graph on the base PCs. The scores use only graph metrics of that graph.",
         "scvi": "scVI trains a VAE on the raw counts of the HVGs, on CPU. More epochs cost more time.",
         "scanvi": "scANVI starts from one fixed 100-epoch scVI pretrain and uses the cell-type labels, "
         "except in the 3 Oetjen batches, which have no labels for it. "
@@ -251,7 +257,8 @@ with app.setup(hide_code=True):
         "2. Pick one winner. Weigh \"Bio conservation\" against \"Batch correction\". "
         "The default rank is \"Total\" = 0.6 * Bio conservation + 0.4 * Batch correction. "
         "Batch correction that removes biology is a loss: if the Total leader has much lower Bio conservation "
-        "than the runner-up, you can pick the runner-up. Tell why. Never pick a method that has no metrics.\n"
+        "than the runner-up, you can pick the runner-up. Tell why. Never pick a method that has no metrics. "
+        "bbknn outputs a graph: as in scIB, its scores are means of 3 graph metrics, and the other scores are means of 5.\n"
         "3. Call check_lineage for the winner, then promote. If either one refuses, stop: "
         "do not tag, discard or collect garbage. Report the reason.\n"
         "4. Call tag_winner for the winner.\n"
@@ -908,6 +915,20 @@ def _():
     The labels are the expert cell types in `obs["final_annotation"]`, and the batches are `obs["batch"]`.
     The base `X_pca` is the unintegrated reference for the PCR comparison.
 
+    BBKNN gives a kNN graph, not an embedding.
+    As in the scIB paper, a graph output gets only the metrics that work on a graph:
+
+    - Bio conservation: Leiden NMI and ARI (Leiden clusters of the graph against the expert labels) and cLISI.
+    - Batch correction: iLISI, kBET per label and graph connectivity.
+
+    The silhouettes, the k-means metrics and the PCR comparison need an embedding, so BBKNN does not get them.
+    Each score is the mean of the metrics that the method gets.
+    scIB gives each output type the same number of neighbors per cell.
+    Here `diffusion_nn` of scib-metrics does this: it finds the neighbors of each cell in a diffusion map of the BBKNN graph.
+    scIB used shortest paths in the graph for LISI, so these values differ from the scIB code.
+    A BBKNN graph in more than 50 disconnected parts gets no score. The agent gets an error and tries other parameters.
+    With many parts, the eigen solve of `diffusion_nn` does not end in a useful time.
+
     The 3 Oetjen batches (bone marrow, 9,581 cells) are the query batches.
     scANVI trains with the labels of the other batches only. The query cells are "Unknown" for it.
     Bio conservation scores only the query cells, for all 7 methods.
@@ -928,8 +949,25 @@ def _():
 
 
 @app.function
-def score(adata: AnnData, method: str, embedding: np.ndarray, n_jobs: int = -1) -> dict[str, float]:
+def metric_sets(method: str) -> tuple[BioConservation, BatchCorrection]:
+    """The scib-metrics metrics for `method`. A graph method gets no silhouette, PCR or k-means metric, as in scIB."""
+    if method not in GRAPH_METHODS:
+        return BioConservation(), BatchCorrection()
+    bio = BioConservation(
+        isolated_labels=False, nmi_ari_cluster_labels_leiden=True, nmi_ari_cluster_labels_kmeans=False,
+        silhouette_label=False,
+    )
+    return bio, BatchCorrection(bras=False, pcr_comparison=False)
+
+
+@app.function
+def score(
+    adata: AnnData, method: str, embedding: np.ndarray, n_jobs: int = -1, connectivities=None
+) -> dict[str, float]:
     """Scores one embedding. Returns the three aggregates, `seconds` and `pcr_clipped`.
+
+    A graph method is scored on its `connectivities`, with the metrics of `metric_sets`.
+    A graph in more than MAX_GRAPH_PARTS disconnected parts gives a ValueError.
 
     Bio conservation uses only the cells of QUERY_BATCHES, whose labels scANVI never sees.
     Batch correction uses all cells, with the base `X_pca` as the unintegrated reference.
@@ -939,18 +977,28 @@ def score(adata: AnnData, method: str, embedding: np.ndarray, n_jobs: int = -1) 
 
     `n_jobs` limits the worker count when several agent processes share the CPU.
     """
+    if method in GRAPH_METHODS and connectivities is None:
+        raise ValueError(f"{method} outputs a graph, so score needs its connectivities")
     key = f"X_{method}"
     scored = AnnData(obs=adata.obs[[BATCH_KEY, LABEL_KEY]].copy(), obsm={"X_pca": adata.obsm["X_pca"], key: embedding})
     query = scored.obs[BATCH_KEY].isin(QUERY_BATCHES).to_numpy()
+    bio_metrics, batch_metrics = metric_sets(method)
+    if method in GRAPH_METHODS:
+        cells = {"Bio conservation": query, "Batch correction": np.ones(len(query), dtype=bool)}
+        graphs = {name: scipy.sparse.csr_matrix(connectivities)[c][:, c] for name, c in cells.items()}
+        for name, graph in graphs.items():
+            parts = connected_components(graph, directed=False)[0]
+            if parts > MAX_GRAPH_PARTS:
+                raise ValueError(f"the {name} graph has {parts} disconnected parts; the limit is {MAX_GRAPH_PARTS}")
     t0 = time.perf_counter()
-    # Full default metric set of scib-metrics, in two groups on two cell sets.
+    # The metric set of scib-metrics, in two groups on two cell sets.
     benches = {
         "Bio conservation": Benchmarker(
             scored[query].copy(),
             batch_key=BATCH_KEY,
             label_key=LABEL_KEY,
             embedding_obsm_keys=[key],
-            bio_conservation_metrics=BioConservation(),
+            bio_conservation_metrics=bio_metrics,
             batch_correction_metrics=None,
             # Without this key, prepare runs a PCA of the empty X. The bio metrics do not use it.
             pre_integrated_embedding_obsm_key="X_pca",
@@ -963,12 +1011,17 @@ def score(adata: AnnData, method: str, embedding: np.ndarray, n_jobs: int = -1) 
             label_key=LABEL_KEY,
             embedding_obsm_keys=[key],
             bio_conservation_metrics=None,
-            batch_correction_metrics=BatchCorrection(),
+            batch_correction_metrics=batch_metrics,
             pre_integrated_embedding_obsm_key="X_pca",
             n_jobs=n_jobs,
             progress_bar=False,
         ),
     }
+    if method in GRAPH_METHODS:
+        # The graph gives the neighbors. diffusion_nn gives each cell the same neighbor count, as scIB does for graphs.
+        for name, bench in benches.items():
+            graph = graphs[name]
+            bench.prepare(neighbor_computer=lambda _X, k, graph=graph: diffusion_nn(graph, k=k))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         for bench in benches.values():
@@ -1114,6 +1167,14 @@ def _(repo, shootout):
     # GC in the evaluator deletes the loser snapshots, so their manifests are read now.
     manifests = manifest_rows(repo, shootout)
     return (manifests,)
+
+
+@app.cell
+def _(METHODS, repo, run, shootout):
+    # GC in the evaluator deletes the loser snapshots, so the best embedding of each method is read now.
+    assert shootout is not None
+    embeddings = best_embeddings(repo, run, METHODS)
+    return (embeddings,)
 
 
 @app.cell
@@ -1311,9 +1372,9 @@ def collect_garbage(repo: icechunk.Repository, open_writers: int) -> dict:
 
 
 @app.cell
-def _(DRY_RUN, METHODS, budget, env, manifests, run):
-    # GC below deletes the loser snapshots. The reference to manifests makes this cell run after their read.
-    assert manifests is not None
+def _(DRY_RUN, METHODS, budget, embeddings, env, manifests, run):
+    # GC below deletes the loser snapshots. The references make this cell run after the manifest and embedding reads.
+    assert manifests is not None and embeddings is not None
     _t0 = time.perf_counter()
     evaluator = (scripted_evaluator if DRY_RUN else run_evaluator)(env, run, METHODS, budget)
     evaluator_s = time.perf_counter() - _t0
@@ -1358,6 +1419,45 @@ def _(budget, evaluator, repo, run):
         _fig,
         mo.ui.table(_crosstab.reset_index(), selection=None, page_size=16),
     ])
+    return
+
+
+@app.cell
+def _():
+    mo.md(r"""
+    ### UMAP of each method
+
+    Before the evaluator deletes the losing branches, the notebook reads the embedding of the best iteration of each method.
+    The cell below computes a UMAP of each embedding, in about 1 minute per method.
+    Choose a method to see its UMAP, coloured by expert cell type and by batch.
+    """)
+    return
+
+
+@app.cell
+def _(budget, embeddings, repo, run):
+    _skip = skip_reason(budget)
+    mo.stop(bool(_skip), mo.md(_skip or ""))
+    mo.stop(not embeddings, mo.md("No method has a scored iteration."))
+    _obs = read_element(repo.readonly_session(snapshot_id=run.base).store, "obs")[[LABEL_KEY, BATCH_KEY]]
+    _adata = AnnData(obs=_obs, obsm={f"X_{m}": e["embedding"] for m, e in embeddings.items()})
+    method_umaps = {m: umap_coords(_adata, m) for m in mo.status.progress_bar(list(embeddings), title="UMAP")}
+    method_obs = _adata.obs
+    _ranked = sorted(embeddings, key=lambda m: embeddings[m]["Total"], reverse=True)
+    _options = {f"{m} (Total {embeddings[m]['Total']:.3f})": m for m in _ranked}
+    method_choice = mo.ui.radio(_options, value=next(iter(_options)), inline=True, label="Method")
+    method_choice
+    return method_choice, method_obs, method_umaps
+
+
+@app.cell
+def _(method_choice, method_obs, method_umaps):
+    # Each choice makes a new figure; closing it keeps pyplot from holding all of them.
+    _fig = umap_figure(
+        method_umaps[method_choice.value], method_obs, [LABEL_KEY, BATCH_KEY], f"UMAP of X_{method_choice.value}"
+    )
+    plt.close(_fig)
+    _fig
     return
 
 
@@ -1676,9 +1776,9 @@ def _():
     ## Limits
 
     - Bio conservation uses only the 9,581 cells of the 3 Oetjen batches. Thus it has less data than Batch correction.
-      Totals from runs before this split are not comparable with Totals from later runs.
-    - BBKNN gives a graph, not an embedding.
-      Its embedding here is the 2-D UMAP of that graph, so its scIB scores use 2 dimensions and not 10 to 50.
+    - BBKNN gives a graph, not an embedding, so its scores are the means of 3 graph metrics each.
+      The scores of the other methods are the means of 5 metrics each. Thus a comparison with BBKNN is approximate.
+      `X_bbknn` holds the 2-D UMAP of the graph, for the plots only.
       With some `trim` values the BBKNN graph splits into parts.
       UMAP then places the parts with a spectral layout, and sklearn warns that the graph is not fully connected.
     - All agents run on one machine and share its CPUs.
@@ -2335,7 +2435,7 @@ class MethodTools:
         step_start = time.perf_counter()
         try:
             out = run_method(self.adata, self.method, params, pretrained=self.pretrained)
-            metrics = score(self.adata, self.method, out.embedding, n_jobs=self.n_jobs)
+            metrics = score(self.adata, self.method, out.embedding, n_jobs=self.n_jobs, connectivities=out.connectivities)
         except Exception as error:  # a fit can fail for some params; the agent sees the error and continues
             return {"error": f"{type(error).__name__}: {error}"}
         metrics["fit_seconds"] = out.fit_s
@@ -3762,6 +3862,22 @@ def label_agreement(adata: AnnData) -> tuple[dict, pd.DataFrame]:
     truth, found = adata.obs[LABEL_KEY], adata.obs[PROMOTED_COLUMN]
     scores = {"ARI": adjusted_rand_score(truth, found), "NMI": normalized_mutual_info_score(truth, found)}
     return scores, pd.crosstab(truth, found)
+
+
+@app.function(hide_code=True)
+def best_embeddings(repo: icechunk.Repository, run: Run, methods: list[str]) -> dict[str, dict]:
+    """The embedding, Total and iteration of the best iteration of each scored branch. Run it before GC deletes losers."""
+    best = {}
+    for method, scores in branch_scores(repo, run, methods).items():
+        if not scores.get("metrics"):
+            continue
+        store = repo.readonly_session(snapshot_id=scores["best_snapshot"]).store
+        best[method] = {
+            "embedding": np.asarray(read_element(store, f"obsm/X_{method}")),
+            "Total": scores["metrics"]["Total"],
+            "iteration": scores["best_iteration"],
+        }
+    return best
 
 
 @app.function(hide_code=True)

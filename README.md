@@ -127,7 +127,6 @@ An environment variable with the name in the table sets the start value of its f
 ## Measured runs
 
 Notebook 2 runs on 2026-10-23 with the default models.
-These runs scored Bio conservation on all cells. The notebook now scores it on the 3 Oetjen query batches only, so new Totals differ.
 
 | Where | Wall time | API cost | Median commit | Write plus commit share of an agent step |
 |---|---|---|---|---|
