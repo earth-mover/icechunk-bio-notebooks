@@ -1180,6 +1180,28 @@ def _(METHODS, repo, run, shootout):
 @app.cell
 def _():
     mo.md(r"""
+    ### Branches of the run
+
+    Icechunk draws the commit tree of all branches in the repository.
+    Each method branch forks from the base snapshot and holds one commit per iteration.
+    The tree also shows the kept branches of earlier runs.
+    The evaluator deletes the losing branches, so the tree is drawn before it starts.
+    """)
+    return
+
+
+@app.cell
+def _(repo, shootout):
+    # GC in the evaluator deletes the loser branches, so the tree is drawn now.
+    assert shootout is not None
+    history = repo.ancestry_graph()
+    history
+    return (history,)
+
+
+@app.cell
+def _():
+    mo.md(r"""
     ## Evaluator
 
     The evaluator reads the scores of all branches.
@@ -1372,9 +1394,9 @@ def collect_garbage(repo: icechunk.Repository, open_writers: int) -> dict:
 
 
 @app.cell
-def _(DRY_RUN, METHODS, budget, embeddings, env, manifests, run):
-    # GC below deletes the loser snapshots. The references make this cell run after the manifest and embedding reads.
-    assert manifests is not None and embeddings is not None
+def _(DRY_RUN, METHODS, budget, embeddings, env, history, manifests, run):
+    # GC below deletes the loser snapshots. The references make this cell run after the manifest, embedding and tree reads.
+    assert manifests is not None and embeddings is not None and history is not None
     _t0 = time.perf_counter()
     evaluator = (scripted_evaluator if DRY_RUN else run_evaluator)(env, run, METHODS, budget)
     evaluator_s = time.perf_counter() - _t0
@@ -1394,7 +1416,9 @@ def _():
     ## Result on `main`
 
     The cell below reads `main` as one AnnData.
-    It compares the promoted Leiden labels with the ground-truth cell types, and it shows the UMAP of the winner.
+    It compares the promoted Leiden labels with the ground-truth cell types of the 3 Oetjen query batches, and it shows the UMAP of the winner.
+    scANVI trains on the labels of the other batches, so ARI and NMI do not use those cells, as in Bio conservation.
+    The next cell shows the commit history of the run `main`, as Icechunk draws it.
     """)
     return
 
@@ -1415,10 +1439,17 @@ def _(budget, evaluator, repo, run):
     print(f"Winner {_winner}: ARI {_agreement['ARI']:.3f}, NMI {_agreement['NMI']:.3f}")
     mo.vstack([
         mo.md(f"Winner: **{_winner}**. ARI {_agreement['ARI']:.3f}, NMI {_agreement['NMI']:.3f} "
-              f"of `obs[\"{PROMOTED_COLUMN}\"]` against `obs[\"{LABEL_KEY}\"]`."),
+              f"of `obs[\"{PROMOTED_COLUMN}\"]` against `obs[\"{LABEL_KEY}\"]`, on the cells of the 3 Oetjen query batches."),
         _fig,
         mo.ui.table(_crosstab.reset_index(), selection=None, page_size=16),
     ])
+    return
+
+
+@app.cell
+def _(budget, repo, run):
+    mo.stop(bool(skip_reason(budget)))
+    repo.ancestry_graph(branch=run.main)
     return
 
 
@@ -1776,6 +1807,7 @@ def _():
     ## Limits
 
     - Bio conservation uses only the 9,581 cells of the 3 Oetjen batches. Thus it has less data than Batch correction.
+    - Batch correction scores all cells. kBET per label, graph connectivity and BRAS group the cells by expert label. scANVI trained on the labels of the cells outside the Oetjen batches, so these metrics can favor scANVI a little. The scIB benchmark scores batch correction in the same way.
     - BBKNN gives a graph, not an embedding, so its scores are the means of 3 graph metrics each.
       The scores of the other methods are the means of 5 metrics each. Thus a comparison with BBKNN is approximate.
       `X_bbknn` holds the 2-D UMAP of the graph, for the plots only.
@@ -3858,8 +3890,12 @@ def cost_time_rows(shootout: dict[str, dict], evaluator: dict, evaluator_s: floa
 
 @app.function(hide_code=True)
 def label_agreement(adata: AnnData) -> tuple[dict, pd.DataFrame]:
-    """ARI and NMI of the promoted Leiden labels against the ground truth, and their crosstab."""
-    truth, found = adata.obs[LABEL_KEY], adata.obs[PROMOTED_COLUMN]
+    """ARI and NMI of the promoted Leiden labels against the ground truth on the QUERY_BATCHES cells, and their crosstab.
+
+    scANVI trains on the labels of the other cells, so they are not scored, as in Bio conservation.
+    """
+    query = adata.obs[BATCH_KEY].isin(QUERY_BATCHES)
+    truth, found = adata.obs.loc[query, LABEL_KEY], adata.obs.loc[query, PROMOTED_COLUMN]
     scores = {"ARI": adjusted_rand_score(truth, found), "NMI": normalized_mutual_info_score(truth, found)}
     return scores, pd.crosstab(truth, found)
 
