@@ -509,6 +509,34 @@ def _(sizes):
 @app.cell
 def _():
     mo.md(r"""
+    ### What each commit writes
+
+    The table below sums the stored bytes of the arrays that each commit writes.
+    anndata writes a changed element as new arrays, so a changed `X` is a full new write.
+    QC drops cells, so it writes all chunks of `X` again.
+    Normalize writes its values to a new layer, and `X` keeps the raw counts.
+    The later stages do not write `X` or a layer.
+    """)
+    return
+
+
+@app.cell
+def _(repo, snap_fix):
+    _log = list(repo.ancestry(branch="main"))[::-1]
+    assert _log[-1].id == snap_fix
+    _rows = {}
+    for _parent, _child in zip(_log, _log[1:]):
+        _bytes = written_bytes(repo, _parent.id, _child.id)
+        _matrix = [b for path, b in _bytes.items() if path.split("/")[1] in ("X", "layers")]
+        _rows[_child.metadata["stage"]] = {"MB written": sum(_bytes.values()) / 1e6, "MB of X and layers": sum(_matrix) / 1e6}
+    commit_writes = pd.DataFrame.from_dict(_rows, orient="index")
+    commit_writes.round(2)
+    return (commit_writes,)
+
+
+@app.cell
+def _():
+    mo.md(r"""
     ## What this shows, and its limits
 
     - The audit log gives the method, the parameters and the package versions of each stage. Code reads it from the repository.
@@ -554,6 +582,21 @@ def fresh_name(prefix: str) -> str:
 @app.function(hide_code=True)
 def directory_bytes(path: pathlib.Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+@app.function(hide_code=True)
+def written_bytes(repo: icechunk.Repository, parent: str, child: str) -> dict[str, int]:
+    """Stored bytes of each new array in `child`, by path. Refuses a chunk update in place.
+
+    anndata writes a changed element as new arrays, so the new arrays are all that its commit writes.
+    """
+    diff = repo.diff(from_snapshot_id=parent, to_snapshot_id=child)
+    # A new array lists its chunks as updated too. Only an old array with updated chunks is a write in place.
+    in_place = set(diff.updated_chunks) - diff.new_arrays
+    if in_place:
+        raise ValueError(f"chunks updated in place: {sorted(in_place)}")
+    root = zarr.open_group(repo.readonly_session(snapshot_id=child).store, mode="r")
+    return {path: root[path.lstrip("/")].nbytes_stored() for path in sorted(diff.new_arrays)}
 
 
 @app.function(hide_code=True)

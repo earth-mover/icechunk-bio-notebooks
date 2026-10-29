@@ -73,16 +73,19 @@ with app.setup(hide_code=True):
     import logging
     import multiprocessing
     import os
+    import platform
     import queue
     import secrets
     import shutil
     import signal
     import statistics
+    import subprocess
     import tempfile
     import time
     import warnings
     from collections.abc import Callable, Mapping, MutableMapping
     from dataclasses import dataclass
+    from importlib.metadata import version
     from pathlib import Path
 
     # Scoring runs on the CPU. Only scvi and scanvi use ICB_ACCELERATOR.
@@ -130,6 +133,10 @@ with app.setup(hide_code=True):
     ACCELERATORS = ("cpu", "gpu", "auto")
 
     DATA_DIR = Path(__file__).resolve().parent / "data"
+    # Packages whose versions each iteration commit records.
+    PROVENANCE_PACKAGES = (
+        "icechunk", "anndata", "zarr", "scanpy", "numpy", "harmonypy", "scanorama", "bbknn", "scvi-tools", "scib-metrics",
+    )
 
     IMMUNE_URL = "https://ndownloader.figshare.com/files/25717328"
     IMMUNE_FILENAME = "Immune_ALL_human.h5ad"
@@ -258,7 +265,9 @@ with app.setup(hide_code=True):
         "The default rank is \"Total\" = 0.6 * Bio conservation + 0.4 * Batch correction. "
         "Batch correction that removes biology is a loss: if the Total leader has much lower Bio conservation "
         "than the runner-up, you can pick the runner-up. Tell why. Never pick a method that has no metrics. "
-        "bbknn outputs a graph: as in scIB, its scores are means of 3 graph metrics, and the other scores are means of 5.\n"
+        "bbknn outputs a graph: as in scIB, its scores are means of 3 graph metrics, and the other scores are means of 5. "
+        "Thus its Bio conservation does not compare with the others. "
+        "When bbknn is the Total leader or the runner-up, keep the Total ranking.\n"
         "3. Call check_lineage for the winner, then promote. If either one refuses, stop: "
         "do not tag, discard or collect garbage. Report the reason.\n"
         "4. Call tag_winner for the winner.\n"
@@ -1085,7 +1094,7 @@ def one_iteration_by_hand(repo: icechunk.Repository, run: Run) -> dict:
         out = run_method(adata, "harmony", BY_HAND_PARAMS)
         metrics = score(adata, "harmony", out.embedding)
         write_method_output(session.store, "harmony", out, BY_HAND_PARAMS, metrics, "by hand")
-        snapshot = session.commit("harmony by hand", metadata={"params": BY_HAND_PARAMS, "metrics": metrics})
+        snapshot = session.commit("harmony by hand", metadata={"params": BY_HAND_PARAMS, "metrics": metrics, "code": code_provenance()})
 
         diff = repo.diff(from_snapshot_id=run.base, to_snapshot_id=snapshot)
         changed = {
@@ -1123,6 +1132,9 @@ def _():
     Each agent gets a fixed parameter space and an iteration limit.
     Each iteration fits the method, scores it with scib-metrics, and makes one commit on the branch of the agent.
     The commit message holds the reasoning of the agent for that step.
+    The commit metadata holds the params, the metrics, the git commit of the notebook and the package versions.
+    The notebook holds the code and the prompts, so the git commit identifies both.
+    The commit ends in "-dirty" if the notebook file has uncommitted changes. Outside a git checkout, for example on molab, it is empty.
 
     When a cap trips, all agents stop, and each branch keeps its last commit.
     A cap can stop an agent during an API call.
@@ -2488,7 +2500,7 @@ class MethodTools:
         wait_s = t0 - wait_start
         snapshot = session.commit(
             f"{self.method} iter {iteration}: {reasoning}",
-            metadata={"params": params, "metrics": metrics, "iteration": iteration},
+            metadata={"params": params, "metrics": metrics, "iteration": iteration, "code": code_provenance()},
         )
         commit_s = time.perf_counter() - t0
         committed_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -3264,6 +3276,29 @@ def agent_commit(produce, env: dict, run: Run, budget: Budget) -> tuple[str, str
 
 
 @app.function(hide_code=True)
+def git_commit(path: Path) -> str | None:
+    """HEAD of the git checkout that holds `path`, with "-dirty" if `path` has changes. None outside a checkout."""
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(path.parent), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        head = git("rev-parse", "HEAD")
+        changed = git("status", "--porcelain", "--", path.name)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return f"{head}-dirty" if changed else head
+
+
+@app.function(hide_code=True)
+def code_provenance() -> dict:
+    """The git commit of the notebook and the package versions, for the commit metadata."""
+    versions = {name: version(name) for name in PROVENANCE_PACKAGES} | {"python": platform.python_version()}
+    return {"git_commit": git_commit(Path(__file__).resolve()), "versions": versions}
+
+
+@app.function(hide_code=True)
 def commit_output(
     repo: icechunk.Repository, run: Run, method: str, out: MethodOutput, params: dict,
     metrics: dict | None = None, reasoning: str = "fixed params",
@@ -3271,7 +3306,7 @@ def commit_output(
     """Commits `out` as iteration 1 on the method branch, which starts at the run base."""
     branch = ensure_method_branch(repo, run, method)
     with repo.transaction(
-        branch, message=f"{method} iter 1: {reasoning}", metadata={"params": params, "iteration": 1}
+        branch, message=f"{method} iter 1: {reasoning}", metadata={"params": params, "iteration": 1, "code": code_provenance()}
     ) as store:
         write_method_output(store, method, out, params, metrics or {}, reasoning)
     return repo.lookup_branch(branch)
